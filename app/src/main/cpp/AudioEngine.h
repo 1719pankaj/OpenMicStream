@@ -4,14 +4,35 @@
 #include <oboe/Oboe.h>
 #include <android/log.h>
 #include <mutex>
-#include "opus.h" // Include the Opus header
+#include <chrono> // For timestamps
+#include "opus.h"
+
+// For networking
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
+
+// Our custom packet header
+#pragma pack(push, 1)
+struct PacketHeader {
+    uint8_t version = 1;
+    uint8_t flags = 0;
+    uint16_t sequence = 0;
+    uint32_t timestamp = 0;
+    uint32_t auth_id = 12345; // Placeholder auth ID
+};
+#pragma pack(pop)
+
 
 class AudioEngine : public oboe::AudioStreamDataCallback, public oboe::AudioStreamErrorCallback {
 public:
     AudioEngine();
     ~AudioEngine();
 
-    int32_t start();
+    // Now takes target IP and port
+    int32_t start(const char* targetIp, int targetPort);
     void stop();
 
     // Oboe callbacks
@@ -26,8 +47,8 @@ public:
 private:
     // Audio constants
     static constexpr int32_t kSampleRate = 48000;
-    static constexpr int32_t kChannelCount = 1; // Mono
-    static constexpr int32_t kFrameSize = 960; // 20ms at 48kHz (48000 * 0.020)
+    static constexpr int32_t kChannelCount = 1;
+    static constexpr int32_t kFrameSize = 960;
 
     // Oboe
     oboe::ManagedStream mStream;
@@ -35,8 +56,15 @@ private:
 
     // Opus
     OpusEncoder *mEncoder;
-    // Buffer to hold encoded Opus data. 1500 is a safe size for one frame.
-    unsigned char mOpusPacket[1500];
+
+    // Network
+    int mSocket = -1;
+    struct sockaddr_in mTargetAddress{};
+    uint16_t mSequenceNumber = 0;
+    std::chrono::time_point<std::chrono::steady_clock> mStartTime;
+
+    // Combined buffer for header + opus data
+    unsigned char mSendBuffer[1500];
 };
 
 #endif //OPENMICSTREAM_AUDIOENGINE_H

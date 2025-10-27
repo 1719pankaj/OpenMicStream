@@ -6,20 +6,16 @@ import javax.inject.Singleton
 
 private const val TAG = "AudioEngine"
 
-/**
- * A Kotlin wrapper for the native C++ AudioEngine.
- * This class manages the lifecycle of the native engine instance.
- */
 @Singleton
 class AudioEngine @Inject constructor() {
 
-    // This holds the memory address of the C++ AudioEngine instance.
     private var nativeHandle: Long = 0
 
     val isStarted: Boolean
         get() = nativeHandle != 0L
 
-    fun start(): Boolean {
+    // MODIFIED: Now accepts IP and port
+    fun start(targetIp: String, targetPort: Int): Boolean {
         if (isStarted) {
             Log.w(TAG, "Attempted to start an already running engine.")
             return true
@@ -30,10 +26,9 @@ class AudioEngine @Inject constructor() {
             return false
         }
 
-        val result = native_start(nativeHandle)
+        val result = native_start(nativeHandle, targetIp, targetPort)
         if (result != 0) {
             Log.e(TAG, "Failed to start native engine. Error code: $result")
-            // Clean up if start fails
             native_destroy(nativeHandle)
             nativeHandle = 0
             return false
@@ -53,11 +48,9 @@ class AudioEngine @Inject constructor() {
         Log.i(TAG, "AudioEngine stopped.")
     }
 
-    // --- Native Method Declarations ---
-    // These link to the JNI functions in native-lib.cpp
-
+    // MODIFIED: Signature of native_start
     private external fun native_create(): Long
-    private external fun native_start(engineHandle: Long): Int
+    private external fun native_start(engineHandle: Long, targetIp: String, targetPort: Int): Int
     private external fun native_stop(engineHandle: Long)
     private external fun native_destroy(engineHandle: Long)
 }

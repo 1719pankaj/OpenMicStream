@@ -38,21 +38,22 @@ class AudioService : android.app.Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Handle the stop action from the notification
         if (intent?.action == ACTION_STOP) {
-            // Tell the system to stop the service. This will trigger onDestroy().
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // Attempt to start the native audio engine
-        if (!audioEngine.isStarted && !audioEngine.start()) {
-            // If the engine fails to start, stop the service immediately.
+        // --- THIS IS THE KEY CHANGE ---
+        // For now, we hardcode the target. Later this will come from mDNS discovery.
+        // Use your PC's actual local IP address here for testing.
+        val targetIp = "192.168.29.11" // <-- CHANGE THIS TO YOUR PC's IP
+        val targetPort = 48123
+
+        if (!audioEngine.isStarted && !audioEngine.start(targetIp, targetPort)) {
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // If engine started successfully, promote to foreground service
         startForeground(NOTIFICATION_ID, createNotification())
         serviceManager.setStreaming(true)
 

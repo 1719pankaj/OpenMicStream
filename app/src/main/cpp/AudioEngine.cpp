@@ -1,33 +1,56 @@
 #include "AudioEngine.h"
 
-AudioEngine::AudioEngine() : mEncoder(nullptr) { // Initialize mEncoder to null
+// Helper to get monotonic milliseconds
+uint32_t get_monotonic_time_ms() {
+    auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+}
+
+AudioEngine::AudioEngine() : mEncoder(nullptr) {
     __android_log_print(ANDROID_LOG_INFO, "AudioEngine", "Instance created");
 }
 
 AudioEngine::~AudioEngine() {
-    // Ensure cleanup happens even if stop() wasn't called
-    if (mEncoder) {
-        opus_encoder_destroy(mEncoder);
-    }
+    // Ensure cleanup happens
+    stop();
     __android_log_print(ANDROID_LOG_INFO, "AudioEngine", "Instance destroyed");
 }
 
-int32_t AudioEngine::start() {
+int32_t AudioEngine::start(const char* targetIp, int targetPort) {
     std::lock_guard<std::mutex> lock(mLock);
-    if (mStream) return 0; // Already running
+    if (mStream) return 0;
 
-    // 1. Create Opus Encoder
+    // 1. Create UDP Socket
+    mSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (mSocket < 0) {
+        __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", "Failed to create socket");
+        return -1;
+    }
+
+    memset(&mTargetAddress, 0, sizeof(mTargetAddress));
+    mTargetAddress.sin_family = AF_INET;
+    mTargetAddress.sin_port = htons(targetPort);
+    if (inet_pton(AF_INET, targetIp, &mTargetAddress.sin_addr) <= 0) {
+        __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", "Invalid target IP address");
+        close(mSocket);
+        mSocket = -1;
+        return -2;
+    }
+    __android_log_print(ANDROID_LOG_INFO, "AudioEngine", "Socket created for %s:%d", targetIp, targetPort);
+
+    // 2. Create Opus Encoder
     int error;
     mEncoder = opus_encoder_create(kSampleRate, kChannelCount, OPUS_APPLICATION_AUDIO, &error);
     if (error != OPUS_OK) {
         __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", "Failed to create Opus encoder: %s", opus_strerror(error));
-        return -1;
+        close(mSocket);
+        mSocket = -1;
+        return -3;
     }
-    // Set a bitrate. 64kbps is a good starting point for high quality voice.
     opus_encoder_ctl(mEncoder, OPUS_SET_BITRATE(64000));
-    opus_encoder_ctl(mEncoder, OPUS_SET_VBR(1)); // Enable VBR
+    opus_encoder_ctl(mEncoder, OPUS_SET_VBR(1));
 
-    // 2. Create and start Oboe stream
+    // 3. Create and start Oboe stream
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Input)
             ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -35,7 +58,6 @@ int32_t AudioEngine::start() {
             ->setFormat(oboe::AudioFormat::I16)
             ->setChannelCount(kChannelCount)
             ->setSampleRate(kSampleRate)
-                    // Request a specific frame count for consistent buffer sizes
             ->setFramesPerCallback(kFrameSize)
             ->setDataCallback(this)
             ->setErrorCallback(this);
@@ -43,32 +65,50 @@ int32_t AudioEngine::start() {
     oboe::Result result = builder.openManagedStream(mStream);
     if (result != oboe::Result::OK) {
         __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", "Failed to create stream. Error: %s", oboe::convertToText(result));
-        return -2;
+        // Cleanup already created resources
+        opus_encoder_destroy(mEncoder);
+        mEncoder = nullptr;
+        close(mSocket);
+        mSocket = -1;
+        return -4;
     }
 
     result = mStream->requestStart();
     if (result != oboe::Result::OK) {
         __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", "Failed to start stream. Error: %s", oboe::convertToText(result));
-        return -3;
+        mStream->close();
+        mStream.reset();
+        opus_encoder_destroy(mEncoder);
+        mEncoder = nullptr;
+        close(mSocket);
+        mSocket = -1;
+        return -5;
     }
 
-    __android_log_print(ANDROID_LOG_INFO, "AudioEngine", "Stream and encoder started successfully");
+    mStartTime = std::chrono::steady_clock::now();
+    mSequenceNumber = 0;
+    __android_log_print(ANDROID_LOG_INFO, "AudioEngine", "Streaming pipeline started successfully");
     return 0;
 }
 
 void AudioEngine::stop() {
     std::lock_guard<std::mutex> lock(mLock);
-    if (!mStream) return; // Already stopped
+    if (!mStream) return;
 
     mStream->stop();
     mStream->close();
-    mStream.reset(); // Important: release the managed stream
+    mStream.reset();
 
     if (mEncoder) {
         opus_encoder_destroy(mEncoder);
         mEncoder = nullptr;
     }
-    __android_log_print(ANDROID_LOG_INFO, "AudioEngine", "Stream and encoder stopped");
+
+    if (mSocket >= 0) {
+        close(mSocket);
+        mSocket = -1;
+    }
+    __android_log_print(ANDROID_LOG_INFO, "AudioEngine", "Streaming pipeline stopped");
 }
 
 oboe::DataCallbackResult AudioEngine::onAudioReady(
@@ -76,29 +116,41 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
         void *audioData,
         int32_t numFrames) {
 
-    if (numFrames != kFrameSize) {
-        __android_log_print(ANDROID_LOG_WARN, "AudioEngine", "Unexpected frame count: %d", numFrames);
-    }
-
-    // The PCM data from Oboe
     auto* pcmData = static_cast<const opus_int16*>(audioData);
 
-    // Encode the PCM data into our packet buffer
+    // Point the opus payload buffer to just after the header in our send buffer
+    unsigned char* opusPayload = mSendBuffer + sizeof(PacketHeader);
+    const opus_int32 opusPayloadMaxSize = sizeof(mSendBuffer) - sizeof(PacketHeader);
+
     opus_int32 encodedBytes = opus_encode(
             mEncoder,
             pcmData,
             numFrames,
-            mOpusPacket,
-            sizeof(mOpusPacket)
+            opusPayload,
+            opusPayloadMaxSize
     );
 
     if (encodedBytes < 0) {
         __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", "Opus encode failed: %s", opus_strerror(encodedBytes));
-    } else if (encodedBytes > 0) {
-        // SUCCESS: We have an encoded packet.
-        // For now, we just log its size. In the next step, we'll send it.
-        __android_log_print(ANDROID_LOG_VERBOSE, "AudioEngine", "Encoded %d PCM frames into %d Opus bytes", numFrames, encodedBytes);
-        // TODO: Pass mOpusPacket (and encodedBytes) to the network sender.
+        return oboe::DataCallbackResult::Continue;
+    }
+
+    if (encodedBytes > 0) {
+        // Create the header
+        PacketHeader header;
+        header.sequence = htons(mSequenceNumber++); // Use network byte order
+        header.timestamp = htonl(get_monotonic_time_ms()); // Use network byte order
+
+        // Copy header into the start of the send buffer
+        memcpy(mSendBuffer, &header, sizeof(PacketHeader));
+
+        // Send the complete packet (header + opus data)
+        ssize_t bytesSent = sendto(mSocket, mSendBuffer, sizeof(PacketHeader) + encodedBytes, 0,
+                                   (struct sockaddr *) &mTargetAddress, sizeof(mTargetAddress));
+
+        if (bytesSent < 0) {
+            __android_log_print(ANDROID_LOG_WARN, "AudioEngine", "Network send failed: %s", strerror(errno));
+        }
     }
 
     return oboe::DataCallbackResult::Continue;
@@ -110,6 +162,5 @@ void AudioEngine::onErrorBeforeClose(oboe::AudioStream *oboeStream, oboe::Result
 
 void AudioEngine::onErrorAfterClose(oboe::AudioStream *oboeStream, oboe::Result error) {
     __android_log_print(ANDROID_LOG_ERROR, "AudioEngine", "Error after close: %s", oboe::convertToText(error));
-    // We can attempt to restart the stream here if needed
-    stop(); // Stop completely on error
+    stop();
 }
