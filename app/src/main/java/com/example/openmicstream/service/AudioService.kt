@@ -29,6 +29,10 @@ class AudioService : android.app.Service() {
         const val NOTIFICATION_ID = 1
         const val NOTIFICATION_CHANNEL_ID = "OpenMicStreamChannel"
         const val ACTION_STOP = "com.example.openmicstream.ACTION_STOP"
+
+        // Keys for intent extras
+        const val EXTRA_TARGET_IP = "com.example.openmicstream.EXTRA_TARGET_IP"
+        const val EXTRA_TARGET_PORT = "com.example.openmicstream.EXTRA_TARGET_PORT"
     }
 
     override fun onCreate() {
@@ -43,13 +47,17 @@ class AudioService : android.app.Service() {
             return START_NOT_STICKY
         }
 
-        // --- THIS IS THE KEY CHANGE ---
-        // For now, we hardcode the target. Later this will come from mDNS discovery.
-        // Use your PC's actual local IP address here for testing.
-        val targetIp = "192.168.29.11" // <-- CHANGE THIS TO YOUR PC's IP
-        val targetPort = 48123
+        // Retrieve connection details from the intent
+        val targetIp = intent?.getStringExtra(EXTRA_TARGET_IP)
+        val targetPort = intent?.getIntExtra(EXTRA_TARGET_PORT, 48123)
 
-        if (!audioEngine.isStarted && !audioEngine.start(targetIp, targetPort)) {
+        if (targetIp == null) {
+            // This should not happen if started from the UI, but as a safeguard:
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        if (!audioEngine.isStarted && !audioEngine.start(targetIp, targetPort!!)) {
             stopSelf()
             return START_NOT_STICKY
         }

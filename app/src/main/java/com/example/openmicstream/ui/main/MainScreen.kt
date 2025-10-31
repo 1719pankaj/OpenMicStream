@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -57,43 +59,65 @@ fun MainScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             if (permissionsState.allPermissionsGranted) {
-                // Permissions are granted, show the main controls
-                MainControls(isStreaming = uiState.isStreaming) {
-                    val intent = Intent(context, AudioService::class.java)
-                    if (uiState.isStreaming) {
-                        context.stopService(intent)
-                    } else {
-                        // For Android 12+, we must start foreground services from the foreground
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            context.startForegroundService(intent)
+                MainControls(
+                    uiState = uiState,
+                    onIpChanged = { viewModel.onTargetIpChanged(it) },
+                    onToggleStreaming = {
+                        val intent = Intent(context, AudioService::class.java).apply {
+                            if (!uiState.isStreaming) {
+                                // Add IP and Port when starting
+                                putExtra(AudioService.EXTRA_TARGET_IP, uiState.targetIp)
+                                putExtra(AudioService.EXTRA_TARGET_PORT, 48123)
+                            }
+                        }
+                        if (uiState.isStreaming) {
+                            context.stopService(intent)
                         } else {
-                            context.startService(intent)
+                            context.startForegroundService(intent)
                         }
                     }
-                }
+                )
             } else {
-                // If we're here, it means the user has explicitly denied permission at least once.
                 PermissionRationale(permissionsState)
             }
         }
     }
 }
 
-@Composable
-fun MainControls(isStreaming: Boolean, onToggleStreaming: () -> Unit) {
-    Text(
-        text = if (isStreaming) "Streaming..." else "Ready to stream",
-        style = MaterialTheme.typography.headlineSmall,
-        color = if (isStreaming) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-    )
-    Spacer(modifier = Modifier.height(32.dp))
-    Button(
-        onClick = onToggleStreaming,
-        modifier = Modifier.size(width = 200.dp, height = 50.dp)
+    @Composable
+    fun MainControls(
+        uiState: MainUiState,
+        onIpChanged: (String) -> Unit,
+        onToggleStreaming: () -> Unit
     ) {
-        Text(if (isStreaming) "Stop Streaming" else "Start Streaming")
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Text(
+                text = if (uiState.isStreaming) "Streaming..." else "Ready to stream",
+                style = MaterialTheme.typography.headlineSmall,
+                color = if (uiState.isStreaming) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+            )
+
+            OutlinedTextField(
+                value = uiState.targetIp,
+                onValueChange = onIpChanged,
+                label = { Text("Target PC IP Address") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                enabled = !uiState.isStreaming, // Disable field while streaming
+                modifier = Modifier.fillMaxWidth(0.8f)
+            )
+
+            Button(
+                onClick = onToggleStreaming,
+                modifier = Modifier.size(width = 200.dp, height = 50.dp)
+            ) {
+                Text(if (uiState.isStreaming) "Stop Streaming" else "Start Streaming")
+            }
+        }
     }
-}
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
